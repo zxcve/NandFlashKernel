@@ -7,7 +7,7 @@
 #include <linux/mtd/mtd.h>
 #include <linux/vmalloc.h>
 #include <linux/string.h>
-
+#include "mapper.h"
 #include "core.h"
 #include "device.h"
 
@@ -27,10 +27,8 @@ static void metadata_format_callback(struct erase_info *e);
 static int format_config(lkp_kv_cfg *config,
 			 void (*callback)(struct erase_info *e));
 static void destroy_config(lkp_kv_cfg *config);
-
 lkp_kv_cfg meta_config;
 lkp_kv_cfg data_config;
-
 
 /**
  * Module initialization function
@@ -66,6 +64,10 @@ static void __exit lkp_kv_exit(void)
 	device_exit();
 	destroy_config(&meta_config);
 	destroy_config(&data_config);
+//	destroy_pagemapping();
+//	destroy_pagemetadata();
+
+
 }
 
 /**
@@ -121,11 +123,17 @@ static int init_config(int mtd_index, lkp_kv_cfg *config)
 
 	/* Flash scan for metadata creation: which flash blocks and pages are
 	 * free/occupied */
+/*	if (init_scan(config) != 0) {
+		printk(PRINT_PREF "Init scan error\n");
+		return -1;
+	}*/
+
+	printk (PRINT_PREF "Start init scan \n");
 	if (init_scan(config) != 0) {
 		printk(PRINT_PREF "Init scan error\n");
 		return -1;
 	}
-
+	printk (PRINT_PREF "init scan ended \n");
 	return 0;
 }
 
@@ -149,6 +157,7 @@ void print_config(lkp_kv_cfg *config)
  * Launch time metadata creation: flash is scanned to determine which flash
  * blocs and pages are free/occupied. Return 0 when ok, -1 on error
  */
+
 int init_scan(lkp_kv_cfg *config)
 {
 	int i, j;
@@ -408,7 +417,6 @@ static int format_config(lkp_kv_cfg *config,
 int format(void)
 {
 	int ret = 0;
-
 	ret = format_config(&data_config, data_format_callback);
 
 	if (ret != 0) {
@@ -434,58 +442,65 @@ int format(void)
  * -3 when we are in read-only mode
  * -4 when the MTD driver returns an error
  */
+
 int set_keyval(const char *key, const char *val)
 {
-	int key_len, val_len, i, ret;
-	char *buffer;
-
-	key_len = strlen(key);
-	val_len = strlen(val);
-
-	if ((key_len + val_len + 2 * sizeof(int)) > data_config.page_size) {
-		/* size to write is too big */
+	uint64_t temp;
+	if(init_pagemetadata()!=0)
+	{
+		printk(PRINT_PREF "ERROR in init pagemetadata \n");
 		return -1;
 	}
 
-	/* the buffer that we are going to write on flash */
-	buffer = (char *)vmalloc(data_config.page_size * sizeof(char));
-
-	/* if the key already exists, return without writing anything to flash */
-	ret = get_keyval(key, buffer);
-	if (ret >= 0) {
-		printk(PRINT_PREF "Key \"%s\" already exists in page %d\n", key,
-		       ret);
-		vfree(buffer);
-		return -2;
+	if(init_pagemapping()!=-0)
+	{
+	
+		printk(PRINT_PREF "ERROR in init_pagemapping \n");
+		return -1;
 	}
 
-	/* prepare the buffer we are going to write on flash */
-	for (i = 0; i < data_config.page_size; i++)
-		buffer[i] = 0x0;
+	if(mount_pagemapping()!=-0)
+	{
+                printk (PRINT_PREF "failed in get_mapping\n");
+  		return -1;
 
-	/* key size ... */
-	memcpy(buffer, &key_len, sizeof(int));
-	/* ... value size ... */
-	memcpy(buffer + sizeof(int), &val_len, sizeof(int));
-	/* ... the key itself ... */
-	memcpy(buffer + 2 * sizeof(int), key, key_len);
-	/* ... then the value itself. */
-	memcpy(buffer + 2 * sizeof(int) + key_len, val, val_len);
+	}
+	else{
+	
+		printk (PRINT_PREF "get successful\n");
+	}
+	if(mount_pagemetadata()!=0)
+	{
+		 printk (PRINT_PREF "failed in get_pagemetadata\n");
+  		return -1;
 
-	/* actual write on flash */
-	ret =
-	    write_page(data_config.current_block * data_config.pages_per_block +
-		       data_config.current_page_offset, buffer, &data_config);
+	}
+	init_freelist();
+	temp=map_page(0);
+	if(temp==-1)
+	{
+		printk(PRINT_PREF "no page mapping exist, call getmapping\n");
+	}
+	temp=get_mapping(5);
+	printk(PRINT_PREF "Allocated page is %llu\n", temp);
+	
+	temp= map_page(5);
+	printk(PRINT_PREF "mapped page is %llu\n", temp);
+	temp=get_mapping(10);
+	printk(PRINT_PREF "mapped page is %llu\n", temp);
+	temp=getcurrent_pagemetadata(temp);
+	printk(PRINT_PREF "metadatastutus is %llu\n", temp);
 
-	vfree(buffer);
+	mark_invalid(5,1);
+	temp=getcurrent_pagemetadata(temp);
+	printk(PRINT_PREF "metadatastutus after invalidating is %llu\n", temp);
 
-	if (ret == -1)		/* read-only */
-		return -3;
-	else if (ret == -2)	/* write error */
-		return -4;
+	printk(PRINT_PREF "end of init_scan_new \n");
 
 	return 0;
 }
+
+
 
 /**
  * Getting a value from a key.
@@ -548,8 +563,6 @@ int get_keyval(const char *key, char *val)
 	vfree(buffer);
 	return -1;
 }
-
-
 /* Setup init and exit functions */
 module_init(lkp_kv_init);
 module_exit(lkp_kv_exit);

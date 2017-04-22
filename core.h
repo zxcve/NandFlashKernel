@@ -17,7 +17,7 @@ typedef enum {
 /* state for a flash page: used or free */
 typedef enum {
 	PG_FREE,
-	PG_VALID
+	PG_VALID,
 } page_state;
 
 /* data structure containing the state of a flash block and the state of the 
@@ -43,12 +43,16 @@ typedef struct {
 	struct semaphore format_lock;	/* used during the format operation */
 
 } lkp_kv_cfg;
-
+typedef struct{
+	int pageid;
+	int* nextpage;
+}freelist;
 /* export some prototypes for function used in the virtual device file */
 int set_keyval(const char *key, const char *val);
 int get_keyval(const char *key, char *val);
 int format(void);
 
-extern lkp_kv_cfg data_config;
+extern lkp_kv_cfg data_config,meta_config;
+;
 
 #endif /* LKP_KV_H */
