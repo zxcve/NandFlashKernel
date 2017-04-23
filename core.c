@@ -10,6 +10,8 @@
 
 #include "core.h"
 #include "device.h"
+#include "index.h"
+#include "cache.h"
 
 #define PRINT_PREF KERN_INFO "[LKP_KV]: "
 
@@ -48,6 +50,8 @@ static int __init lkp_kv_init(void)
 		printk(PRINT_PREF "Virtual device creation error\n");
 		return -1;
 	}
+	
+	cache_init();
 
 	return 0;
 }
@@ -118,7 +122,7 @@ int init_config(int mtd_index)
 int init_scan()
 {
 	int i, j;
-	char *buffer;
+	char *buffer, *key;
 
 	buffer = (char *)vmalloc(config.page_size * sizeof(char));
 
@@ -148,6 +152,11 @@ int init_scan()
 			if (key_len == 0xFFFFFFFF)
 				break;
 			else {
+				key = (char*) vmalloc(key_len + 1);
+				memcpy(buffer + 2 * sizeof(int), key, key_len);
+				key[key_len] = '\0';
+				index_put(key, i * config.pages_per_block + j); 
+
 				/* otherwise the page contains something */
 				config.blocks[i].state = BLK_USED;
 				config.blocks[i].pages_states[j] = PG_VALID;
@@ -192,7 +201,7 @@ void destroy_config(void)
  */
 int set_keyval(const char *key, const char *val)
 {
-	int key_len, val_len, i, ret;
+	int key_len, val_len, i, ret, page_idx;
 	char *buffer;
 
 	key_len = strlen(key);
@@ -207,8 +216,8 @@ int set_keyval(const char *key, const char *val)
 	buffer = (char *)vmalloc(config.page_size * sizeof(char));
 
 	/* if the key already exists, return without writing anything to flash */
-	ret = get_keyval(key, buffer);
-	if (ret >= 0) {
+	ret = index_get(key);
+	if (ret != -1) {
 		printk(PRINT_PREF "Key \"%s\" already exists in page %d\n", key,
 		       ret);
 		vfree(buffer);
@@ -228,10 +237,11 @@ int set_keyval(const char *key, const char *val)
 	/* ... then the value itself. */
 	memcpy(buffer + 2 * sizeof(int) + key_len, val, val_len);
 
+	page_idx = config.current_block * config.pages_per_block +
+		       config.current_page_offset;
 	/* actual write on flash */
 	ret =
-	    write_page(config.current_block * config.pages_per_block +
-		       config.current_page_offset, buffer);
+	    write_page(page_idx, buffer);
 
 	vfree(buffer);
 
@@ -239,7 +249,8 @@ int set_keyval(const char *key, const char *val)
 		return -3;
 	else if (ret == -2)	/* write error */
 		return -4;
-
+		
+	index_put(key, page_idx);
 	return 0;
 }
 
@@ -252,57 +263,40 @@ int set_keyval(const char *key, const char *val)
  */
 int get_keyval(const char *key, char *val)
 {
-	int i, j;
+	//int i, j;
 	char *buffer;
-
-	buffer = (char *)vmalloc(config.page_size * sizeof(char));
-
-	/* read the entirety of valid flash pages until we found the requested key */
-	for (i = 0; i < config.nb_blocks; i++)
-		if (config.blocks[i].state == BLK_USED)
-			for (j = 0; j < config.pages_per_block; j++)
-				if (config.blocks[i].pages_states[j] ==
-				    PG_VALID) {
-					int key_len, val_len;
-					char *cur_key, *cur_val;
-
-					/* flash read */
-					if (read_page
-					    (i * config.pages_per_block + j,
-					     buffer) != 0) {
-						vfree(buffer);
-						return -2;
-					}
-
-					/* get the key and value */
-					memcpy(&key_len, buffer, sizeof(int));
-					memcpy(&val_len, buffer + sizeof(int),
-					       sizeof(int));
-
-					if (key_len != 0xFFFFFFFF) {	/* shoud always be true */
-						cur_key =
-						    buffer + 2 * sizeof(int);
-						cur_val =
-						    buffer + 2 * sizeof(int) +
-						    key_len;
-						if (!strncmp
-						    (cur_key, key,
-						     strlen(key))) {
-							/* key found */
-							memcpy(val, cur_val,
-							       val_len);
-							val[val_len] = '\0';
-							vfree(buffer);
-							return i *
-							    config.
-							    pages_per_block + j;
-						}
-					}
-				}
-
-	/* key not found */
-	vfree(buffer);
-	return -1;
+	uint64_t page_idx;
+	struct cache_page *cp;
+	
+	int key_len, val_len;
+	char *cur_key, *cur_val;
+	
+	page_idx = index_get(key);
+	if(page_idx == -1)
+		return -1;
+		
+	cp = cache_get_page(page_idx);
+	if (cp == NULL)
+		return -3;
+		
+	buffer = cache_read_page(cp);
+	//printk(PRINT_PREF "Buffer %s\n", buffer + 8);
+	
+	/* get the key and value */
+	memcpy(&key_len, buffer, sizeof(int));
+	memcpy(&val_len, buffer + sizeof(int), sizeof(int));
+	//printk(PRINT_PREF "page %d keylen %d vallen %d", page_idx, key_len, val_len);
+	if (key_len != 0xFFFFFFFF) {	/* shoud always be true */
+		cur_key = buffer + 2 * sizeof(int);
+		cur_val = buffer + 2 * sizeof(int) + key_len;
+		if (!strncmp(cur_key, key, strlen(key))) {
+			/* key found */
+			memcpy(val, cur_val, val_len);
+			val[val_len] = '\0';
+			return page_idx;
+		}
+	}
+	return -3;
 }
 
 /**
@@ -409,6 +403,8 @@ int format()
 		for (j = 0; j < config.pages_per_block; j++)
 			config.blocks[i].pages_states[j] = PG_FREE;
 	}
+	
+	index_clear();
 
 	config.current_block = 0;
 	config.current_page_offset = 0;

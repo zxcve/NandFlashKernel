@@ -93,8 +93,8 @@ static long device_ioctl(struct file *file, unsigned int ioctl_num,
 				 (int *)&(((keyval *) (ioctl_param))->status));
 
 			/* nettoyage */
-			vfree(val);
-			vfree(key);
+			//vfree(val);
+			//vfree(key);
 			break;
 		}
 
